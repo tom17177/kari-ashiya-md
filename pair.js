@@ -1076,6 +1076,306 @@ ${config.PREFIX}ᴀʟʟᴍᴇɴᴜ ᴛᴏ ᴠɪᴇᴡ ᴀʟʟ ᴄᴍᴅs
   break;
 }
 
+
+// ================================ song 2 case 🧐🧐🧐
+        case 'songs': {
+  const yts = require('yt-search');
+  const fs = require('fs');
+  const os = require('os');
+  const path = require('path');
+
+  // try require ytdl-chama (may throw if not installed)
+  let ytdlChama = null;
+  try { ytdlChama = require('ytdl-chama'); } catch (e) { ytdlChama = null; }
+
+  // fallback libs (only used if ytdl-chama not usable)
+  let ytdlCore, ffmpeg;
+  try { ytdlCore = require('ytdl-core'); } catch(e) { ytdlCore = null; }
+  try { ffmpeg = require('fluent-ffmpeg'); } catch(e) { ffmpeg = null; }
+  try { 
+    // if using ffmpeg-static, set path
+    const ffmpegStatic = require('ffmpeg-static');
+    if (ffmpeg && ffmpegStatic) ffmpeg.setFfmpegPath(ffmpegStatic);
+  } catch(e) {}
+
+  function extractYouTubeId(url) {
+    const regex = /(?:https?:\/\/)?(?:www\.)?(?:youtube\.com\/(?:watch\?v=|embed\/|v\/|shorts\/)|youtu\.be\/)([a-zA-Z0-9_-]{11})/;
+    const match = (url || '').match(regex);
+    return match ? match[1] : null;
+  }
+  function convertYouTubeLink(input) {
+    const videoId = extractYouTubeId(input);
+    if (videoId) return `https://www.youtube.com/watch?v=${videoId}`;
+    return input;
+  }
+
+  const q = msg.message?.conversation ||
+    msg.message?.extendedTextMessage?.text ||
+    msg.message?.imageMessage?.caption ||
+    msg.message?.videoMessage?.caption || '';
+
+  if (!q || q.trim() === '') {
+    await socket.sendMessage(sender, { text: '*`Need YT_URL or Title`*' });
+    break;
+  }
+
+  const sanitized = (number || '').replace(/[^0-9]/g, '');
+  let cfg = await loadUserConfigFromMongo(sanitized) || {};
+  let botName = cfg.botName || 'CHAMA MINI BOT AI';
+
+  const botMention = {
+    key: { remoteJid: "status@broadcast", participant: "0@s.whatsapp.net", fromMe: false, id: "META_AI_FAKE_ID_SONG" },
+    message: { contactMessage: { displayName: botName, vcard: `BEGIN:VCARD\nVERSION:3.0\nN:${botName};;;;\nFN:${botName}\nEND:VCARD` } }
+  };
+
+  try {
+    // determine video URL
+    let videoUrl = null;
+    const maybeLink = convertYouTubeLink(q.trim());
+    if (extractYouTubeId(q.trim())) {
+      videoUrl = maybeLink;
+    } else {
+      const search = await yts(q.trim());
+      const first = (search?.videos || [])[0];
+      if (!first) {
+        await socket.sendMessage(sender, { text: '*`No results found for that title`*' }, { quoted: botMention });
+        break;
+      }
+      videoUrl = first.url;
+    }
+
+    // ------------- Attempt: use ytdl-chama package -------------
+    let mp3Info = null;
+    if (ytdlChama) {
+      try {
+        // support multiple common export signatures
+        if (typeof ytdlChama === 'function') {
+          mp3Info = await ytdlChama(videoUrl);
+        } else if (ytdlChama.getMP3) {
+          mp3Info = await ytdlChama.getMP3(videoUrl);
+        } else if (ytdlChama.getMp3) {
+          mp3Info = await ytdlChama.getMp3(videoUrl);
+        } else if (ytdlChama.download) {
+          mp3Info = await ytdlChama.download(videoUrl, { format: 'mp3' });
+        } else if (ytdlChama.fetch) {
+          mp3Info = await ytdlChama.fetch(videoUrl);
+        } else {
+          // unknown shape -> try call default export with an object
+          try { mp3Info = await ytdlChama({ url: videoUrl, format: 'mp3' }); } catch(e){ mp3Info = null; }
+        }
+      } catch (err) {
+        console.error('ytdl-chama call error:', err);
+        mp3Info = { error: err };
+      }
+    }
+
+    // normalize fields if ytdl-chama returned something
+    let downloadUrl = null;
+    let title = null;
+    let thumb = null;
+    let duration = null;
+    if (mp3Info) {
+      downloadUrl = mp3Info?.downloadUrl || mp3Info?.url || mp3Info?.result?.download?.url || mp3Info?.result?.url || mp3Info?.data?.url;
+      title = mp3Info?.title || mp3Info?.result?.title || null;
+      thumb = mp3Info?.thumbnail || mp3Info?.thumb || mp3Info?.result?.thumbnail || null;
+      duration = mp3Info?.duration || mp3Info?.result?.duration || null;
+    }
+
+    // ------------- If package returned valid download URL, use it -------------
+    if (downloadUrl) {
+      const caption = `🎵 *Title:* ${title || 'Unknown title'}
+⏱️ *Duration:* ${duration || 'N/A'}
+🔊 *Quality:* 128
+🔗 *Source:* ${videoUrl}
+
+*Reply to this message (quote it) with a number to choose format:*
+1️⃣. 📄 MP3 as Document
+2️⃣. 🎧 MP3 as Audio
+3️⃣. 🎙 MP3 as Voice Note (PTT)
+
+_© Powered by ${botName}_`;
+      const sendOpts = { quoted: botMention };
+      const media = thumb ? { image: { url: thumb }, caption } : { text: caption };
+      const resMsg = await socket.sendMessage(sender, media, sendOpts);
+
+      const handler = async (msgUpdate) => {
+        try {
+          const received = msgUpdate.messages && msgUpdate.messages[0];
+          if (!received) return;
+          const fromId = received.key.remoteJid || received.key.participant || (received.key.fromMe && sender);
+          if (fromId !== sender) return;
+          const text = received.message?.conversation || received.message?.extendedTextMessage?.text;
+          if (!text) return;
+          const quotedId = received.message?.extendedTextMessage?.contextInfo?.stanzaId ||
+            received.message?.extendedTextMessage?.contextInfo?.quotedMessage?.key?.id;
+          if (!quotedId || quotedId !== resMsg.key.id) return;
+          const choice = text.toString().trim().split(/\s+/)[0];
+          await socket.sendMessage(sender, { react: { text: "📥", key: received.key } });
+
+          switch (choice) {
+            case "1":
+              await socket.sendMessage(sender, {
+                document: { url: downloadUrl },
+                mimetype: "audio/mpeg",
+                fileName: `${(title||'song')}.mp3`
+              }, { quoted: received });
+              break;
+            case "2":
+              await socket.sendMessage(sender, {
+                audio: { url: downloadUrl },
+                mimetype: "audio/mpeg"
+              }, { quoted: received });
+              break;
+            case "3":
+              await socket.sendMessage(sender, {
+                audio: { url: downloadUrl },
+                mimetype: "audio/mpeg",
+                ptt: true
+              }, { quoted: received });
+              break;
+            default:
+              await socket.sendMessage(sender, { text: "*Invalid option. Reply with 1, 2 or 3 (quote the card).*" }, { quoted: received });
+              return;
+          }
+          socket.ev.off('messages.upsert', handler);
+        } catch (err) {
+          console.error("Song handler error (ytdl-chama):", err);
+          try { socket.ev.off('messages.upsert', handler); } catch(e) {}
+        }
+      };
+
+      socket.ev.on('messages.upsert', handler);
+      setTimeout(() => { try { socket.ev.off('messages.upsert', handler); } catch(e) {} }, 120*1000);
+      await socket.sendMessage(sender, { react: { text: '🔎', key: msg.key } });
+      break; // done (used package)
+    }
+
+    // ------------- FALLBACK: local ytdl-core + ffmpeg (if package didn't give url) -------------
+    // Only run fallback if libs available
+    if (!ytdlCore || !ffmpeg) {
+      await socket.sendMessage(sender, { text: "*`ytdl-chama didn't return a link and fallback components (ytdl-core + ffmpeg) are not installed.`*" }, { quoted: botMention });
+      break;
+    }
+
+    // prepare metadata (use ytdl-core)
+    const info = await ytdlCore.getInfo(videoUrl);
+    const videoDetails = info.videoDetails || {};
+    const rawTitle = videoDetails.title || 'Unknown title';
+    const safeTitle = rawTitle.replace(/[\\\/:*?"<>|]/g, '').slice(0, 180);
+    const thumbUrl = (videoDetails.thumbnails && videoDetails.thumbnails.slice(-1)[0]?.url) || null;
+    const dur = videoDetails.lengthSeconds ? `${Math.floor(videoDetails.lengthSeconds/60)}:${String(videoDetails.lengthSeconds%60).padStart(2,'0')}` : 'N/A';
+
+    const caption2 = `🎵 *Title:* ${safeTitle}
+⏱️ *Duration:* ${dur}
+🔊 *Quality:* 128
+🔗 *Source:* ${videoUrl}
+
+*Reply to this message (quote it) with a number to choose format:*
+1️⃣. 📄 MP3 as Document
+2️⃣. 🎧 MP3 as Audio
+3️⃣. 🎙 MP3 as Voice Note (PTT)
+
+_© Powered by ${botName}_`;
+    const resMsg2 = await socket.sendMessage(sender, thumbUrl ? { image: { url: thumbUrl }, caption: caption2 } : { text: caption2 }, { quoted: botMention });
+
+    const tmpFile = path.join(os.tmpdir(), `${videoDetails.videoId || Date.now()}.mp3`);
+    const downloadToMp3 = (url, out) => new Promise((resolve, reject) => {
+      const stream = ytdlCore(url, { quality: 'highestaudio', filter: 'audioonly', highWaterMark: 1<<25 });
+      ffmpeg(stream)
+        .audioCodec('libmp3lame')
+        .format('mp3')
+        .audioBitrate(128)
+        .on('error', err => { try{ if (fs.existsSync(out)) fs.unlinkSync(out); }catch(e){}; reject(err); })
+        .on('end', () => resolve(out))
+        .save(out);
+    });
+
+    const handler2 = async (msgUpdate) => {
+      try {
+        const received = msgUpdate.messages && msgUpdate.messages[0];
+        if (!received) return;
+        const fromId = received.key.remoteJid || received.key.participant || (received.key.fromMe && sender);
+        if (fromId !== sender) return;
+        const text = received.message?.conversation || received.message?.extendedTextMessage?.text;
+        if (!text) return;
+        const quotedId = received.message?.extendedTextMessage?.contextInfo?.stanzaId ||
+          received.message?.extendedTextMessage?.contextInfo?.quotedMessage?.key?.id;
+        if (!quotedId || quotedId !== resMsg2.key.id) return;
+        const choice = text.toString().trim().split(/\s+/)[0];
+
+        await socket.sendMessage(sender, { react: { text: "📥", key: received.key } });
+
+        // limit length (protect from huge files) - 15 min example
+        const maxSec = 15 * 60;
+        if (Number(videoDetails.lengthSeconds) && Number(videoDetails.lengthSeconds) > maxSec) {
+          await socket.sendMessage(sender, { text: `*Video too long (> ${maxSec/60} min). Please choose a shorter video.*` }, { quoted: received });
+          socket.ev.off('messages.upsert', handler2);
+          return;
+        }
+
+        if (!fs.existsSync(tmpFile)) {
+          await socket.sendMessage(sender, { text: '*`Preparing MP3, please wait...`*' }, { quoted: received });
+          try { await downloadToMp3(videoUrl, tmpFile); } catch (err) {
+            console.error('fallback ffmpeg error', err);
+            await socket.sendMessage(sender, { text: '*`Error while generating MP3`*' }, { quoted: received });
+            try{ if (fs.existsSync(tmpFile)) fs.unlinkSync(tmpFile); }catch(e){}
+            socket.ev.off('messages.upsert', handler2);
+            return;
+          }
+        }
+
+        if (choice === "1") {
+          await socket.sendMessage(sender, {
+            document: fs.createReadStream(tmpFile),
+            fileName: `${safeTitle}.mp3`,
+            mimetype: 'audio/mpeg'
+          }, { quoted: received });
+        } else if (choice === "2") {
+          await socket.sendMessage(sender, {
+            audio: fs.createReadStream(tmpFile),
+            mimetype: 'audio/mpeg'
+          }, { quoted: received });
+        } else if (choice === "3") {
+          await socket.sendMessage(sender, {
+            audio: fs.createReadStream(tmpFile),
+            mimetype: 'audio/mpeg',
+            ptt: true
+          }, { quoted: received });
+        } else {
+          await socket.sendMessage(sender, { text: "*Invalid option. Reply with 1, 2 or 3 (quote the card).*" }, { quoted: received });
+          return;
+        }
+
+        try { if (fs.existsSync(tmpFile)) fs.unlinkSync(tmpFile); } catch(e){}
+        socket.ev.off('messages.upsert', handler2);
+      } catch (err) {
+        console.error("Song handler error (fallback):", err);
+        try { socket.ev.off('messages.upsert', handler2); } catch(e) {}
+      }
+    };
+
+    socket.ev.on('messages.upsert', handler2);
+    setTimeout(() => { try { socket.ev.off('messages.upsert', handler2); } catch(e) {}; try { if (fs.existsSync(tmpFile)) fs.unlinkSync(tmpFile); } catch(e) {} }, 180*1000);
+
+    await socket.sendMessage(sender, { react: { text: '🔎', key: msg.key } });
+
+  } catch (err) {
+    console.error('Song case error (outer):', err);
+    await socket.sendMessage(sender, { text: "*`Error occurred while processing song request`*" }, { quoted: botMention });
+  }
+
+  break;
+          }
+
+
+
+
+
+
+
+
+                    
+
                 // Case: fc (follow channel
             case 'fc': {
                     if (args.length === 0) {
@@ -1387,6 +1687,7 @@ case 'vv': {
   }
   break;
 }
+                    
 // Case: song
 case 'play':
 case 'song': {
